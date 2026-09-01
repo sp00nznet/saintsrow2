@@ -15,9 +15,9 @@
 | 8. HLE table | `gen_hle_nids --all` | ✅ — 1,056 handlers |
 | 9. SPU extract | Embedded SPU ELFs out of the EBOOT | ✅ — 11 images |
 | 10. Boot harness | CMake on the shared ps3recomp harness | ✅ written |
-| 11. Build & link | clang-cl / Ninja | ⏳ current |
-| 12. SPU lift | 11 images → C | ⬜ |
-| 13. First boot | Enter the recompiled CRT | ⬜ |
+| 11. Build & link | clang-cl / Ninja | ✅ — `sr2.exe` links |
+| 12. SPU lift | 11 images → C | ✅ — 7,995 functions, 13 MB |
+| 13. First boot | Enter the recompiled CRT | ⏳ current |
 | 14. Graphics | RSX → D3D12 | ⬜ |
 | 15. Audio / input | cellAudio + cellPad | ⬜ |
 | 16. Playable | | ⬜ |
@@ -186,8 +186,99 @@ runtime capture like the Simpsons port needed.
 Nothing title-specific. `tools/relift.sh` regenerates every git-ignored artifact
 from a decrypted EBOOT in one command.
 
+**Phase 11 — Build (COMPLETE, then re-done properly)**
+
+The first build **linked on the first attempt** — `sr2.exe`, 126 MB, 21 objects,
+zero errors, only `-Wparentheses-equality` noise from the lifter's `bdnz`
+idiom. For a 611 MB generated tree that has never been pointed at this title
+before, that is not the normal outcome and it was worth being suspicious of.
+
+**War story: the object files that were too small.**
+
+Two objects did not fit:
+
+| chunk | source | object |
+|---|---:|---:|
+| `ppu_recomp_001` | 145 MB | **34 KB** |
+| `ppu_recomp_003` | 63 MB | **6 KB** |
+| (every other chunk) | ~36 MB | ~21 MB |
+
+145 MB of C++ does not compile to 34 KB. Counting function definitions
+explained it: **chunk 001 contained exactly one function**, `func_000BBE60`,
+spanning 2,331,612 lines. The function list said `func_000BBE60` is **156
+bytes**. The lifter had emitted it as an 8.6 MB body running from `0x000BBE60`
+all the way to `0x00924EE8` — swallowing **21,812 other function starts**, i.e.
+two thirds of the entire text segment, into one function. clang then dead-code
+eliminated nearly all of it, because none of those blocks were reachable from
+the entry, and produced a 34 KB object. It compiled, it linked, and it was
+silently wrong.
+
+Root cause, in `ppu_lifter.py`'s jump-table pass: when a `bctr` dispatcher lives
+inside a known function, the lifter **extends that function to cover all its
+switch cases**, because the cases share an epilogue past the function's first
+`blr`. The extension bound is the next function start after `max(cases)`, and
+the code comment asserts this "never swallows a following function." It does,
+the moment **one case target is a misread table entry**. A single garbage word
+that decoded as a case address megabytes downstream dragged the enclosing
+function's end with it, and everything in between became interior labels.
+
+Fix (one condition, in the shared toolkit): a switch's cases live inside the
+dispatcher's own body, so ignore case targets farther from the dispatcher than
+`_MAX_MID_TAIL` (0x6000) when computing the extension — the same span cap the
+mid-function tail-entry pass already uses for exactly this class of misread.
+
+Re-lifted with the cap:
+
+| | before | after |
+|---|---:|---:|
+| Generated source | 611 MB | **416 MB** |
+| Chunks | 14 | **11** |
+| Functions emitted | 57,715 | **57,745** |
+| Lift time | 84 s | **45 s** |
+| Largest single function | 2,331,612 lines | **57,761 lines** |
+| Functions in the smallest-object chunk | 1 | 103 |
+
+195 MB of source vanished, 30 *more* functions came out (the ones that had been
+swallowed now get their own bodies), and the per-chunk function counts flattened
+into the 3,000–10,000 range instead of 1.
+
+The remaining shape is expected, not a second bug: chunks 009 and 010 hold few
+functions for their size because they are full of ~6,300-line mid-function
+tail-entry wrappers into the region around `0xBF2xxx`, each re-emitting its tail
+up to the same 0x6000 cap. That duplication is how this lifter handles interior
+entry points by design.
+
+**Phase 12 — SPU lift (COMPLETE)**
+
+All 11 embedded images lifted directly from the EBOOT — no runtime capture:
+
+| image | functions | coverage |
+|---|---:|---:|
+| spu0000 | 345 | 97.1% |
+| spu0001 | 836 | 97.3% |
+| spu0002 | 1,861 | 93.0% |
+| spu0003 | 1,707 | 98.0% |
+| spu0004 | 1,475 | 97.6% |
+| spu0005 | 853 | 96.5% |
+| spu0006 | 777 | 93.2% |
+| spu0007 | 79 | 97.4% |
+| spu0008 | 16 | 95.5% |
+| spu0009 | 37 | 95.1% |
+| spu0010 | 9 | 98.5% |
+
+**7,995 SPU functions, 13 MB of C.** Coverage is 93–98% of each `.text`; the
+remainder is data and padding embedded in the code section. 3,429 instructions
+across the set still lift to `.word` (undecoded SPU opcodes) — those will need
+opcode work in `spu_lifter.py` before the affected jobs can actually run.
+
+They compile and link into the executable, but they are **not registered with
+the runtime's fingerprint registry yet**, so nothing dispatches to them. That is
+the next SPU task.
+
 ### Next
 
-1. Get the 611 MB tree through clang-cl. The 145 MB chunk is the risk.
-2. Lift the 11 SPU images.
-3. First boot; expect the ~38 boot-critical missing NIDs to surface in order.
+1. First boot: run `sr2.exe` against the real EBOOT and see how far the CRT gets.
+2. Register the 11 SPU images by fingerprint so `cellSpurs` can dispatch to them.
+3. Expect the ~38 boot-critical missing NIDs (`sysPrxForUser` 14, `cellSpurs` 11,
+   `sys_fs` 7, `cellGcmSys` 3) to surface roughly in that order.
+4. Work through the 3,429 undecoded SPU `.word` instructions.

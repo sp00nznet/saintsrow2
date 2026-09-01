@@ -14,7 +14,7 @@
 #   RSX_LIVE_DRAW=1 ./build/sr2 game/EBOOT.elf
 cmake_minimum_required(VERSION 3.20)
 
-# Default to Release. A recompiled title is 611 MB of generated C++; CMake+Ninja
+# Default to Release. A recompiled title is 416 MB of generated C++; CMake+Ninja
 # pick Debug when no type is given (/Od /Ob0 /RTC1), which measured 3x slower on
 # the sibling ports and is invisible unless you read build.ninja.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)

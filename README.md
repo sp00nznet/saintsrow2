@@ -42,14 +42,14 @@ order of magnitude past the PSN titles this toolchain has been proving itself on
   — so they come straight out of the binary, unlike the Simpsons port whose
   SPURS jobs had to be captured from a live run.
 
-The counterweight: **40,235 functions** and a **611 MB** lifted C++ tree. This is
+The counterweight: **40,235 functions** and a **416 MB** lifted C++ tree. This is
 the biggest thing ps3recomp has been pointed at.
 
 ---
 
 ## Current Status
 
-**Analysis and lift complete; the build is the current frontier.**
+**It builds.** `sr2.exe` — 126 MB — links clean; first boot is the current frontier.
 
 | Metric | Value |
 |---|---|
@@ -62,13 +62,13 @@ the biggest thing ps3recomp has been pointed at.
 | Executable code ends | `0xCB0C2C` (last `SHF_EXECINSTR` section) |
 | `.opd` descriptors | 12,799 |
 | Functions detected | **40,235** |
-| Functions lifted to C++ | **57,715** (base + jump-table cases + mid-function tail-entry wrappers) |
-| Unique call targets | 25,980 |
-| Generated source | **611 MB** across 14 chunks |
+| Functions lifted to C++ | **57,745** (base + jump-table cases + mid-function tail-entry wrappers) |
+| Unique call targets | 25,973 |
+| Generated source | **416 MB** across 11 chunks |
 | Imported libraries | **17** |
 | Imported functions | **247** (234 named, 94%) |
 | HLE NID coverage | **164 / 247 (66%)** against ps3recomp's current table |
-| Embedded SPU images | **11** (702,544 B, real SPU ELFs) |
+| Embedded SPU images | **11** (702,544 B) → **7,995 SPU functions**, 13 MB of C |
 | Disc payload | 6.3 GB — 24 `.vpp_ps3` packfiles + 11 Bink videos |
 | Target | Windows x86-64 |
 
@@ -83,13 +83,13 @@ the biggest thing ps3recomp has been pointed at.
 | `--code-end` bound | ✅ **Applied** | `0xCB0C2C`; dropped 339 rodata pseudo-functions before they could explode |
 | Import / NID extraction | ✅ **Complete** | 247 NIDs across 17 libraries (`imports.json`) |
 | Module coverage triage | ✅ **Complete** | 164/247 NIDs covered; the gap is online-only |
-| PPU lifting (→ C++) | ✅ **Complete** | 57,715 functions → 14 chunks, 611 MB, in 84 s |
+| PPU lifting (→ C++) | ✅ **Complete** | 57,745 functions → 11 chunks, 416 MB, in 45 s |
 | HLE NID table | ✅ **Complete** | 1,056 handlers / 88 modules (`src/gen/ppu_hle_nids.cpp`) |
 | SPU image extraction | ✅ **Complete** | 11 images pulled straight out of the EBOOT |
 | Boot harness (CMake) | ✅ **Written** | clang-cl, links prebuilt `ps3recomp_runtime.lib` |
-| Build & link | ⏳ **Current frontier** | 611 MB of C++; chunk 001 alone is 145 MB |
-| SPU lifting | ⬜ Not started | |
-| First boot | ⬜ Not started | |
+| Build & link | ✅ **Complete** | clang-cl, 29 objects, `sr2.exe` 126 MB, zero errors |
+| SPU lifting | ✅ **Complete** | 11 images → 7,995 functions; compile + link, not yet registered |
+| First boot | ⏳ **Current frontier** | |
 | Graphics (RSX → D3D12) | ⬜ Not started | harness provides it; needs a running boot first |
 | Audio / input | ⬜ Not started | |
 
@@ -105,11 +105,11 @@ This is the fifth title on the same harness, and the first AAA-scale one.
 |---|---|---|---|---|
 | Release | PSN 2007 | PSN 2012 | Disc 2011 | **Disc 2008** |
 | EBOOT | 2.7 MB | 1.6 MB | 5.2 MB | **15.8 MB** |
-| Functions lifted | 100k+ | 5,019 | 14,380 | **57,715** |
+| Functions lifted | 100k+ | 5,019 | 14,380 | **57,745** |
 | Imported libraries | 12 | 20 | 23 | **17** |
 | Imported functions | — | 256 | 265 | **247** |
 | SPU images | libsre PRX | captured at runtime | 22 embedded | **11 embedded** |
-| Status | renders | **playable** | boots to main loop | **lift done** |
+| Status | renders | **playable** | boots to main loop | **builds** |
 
 The pattern that keeps holding: **OS surface area does not scale with game
 size.** A 2008 open-world title imports fewer libraries than a 2011 trivia game,
@@ -136,7 +136,7 @@ game/EBOOT.elf                        (ELF64 BE PPC64, ET_EXEC)
         ▼
         │  ppu_lifter.py --code-end 0xCB0C2C --hle-stubs imports.json
         ▼
-src/recomp/ppu_recomp_0NN.cpp         (57,715 functions, 611 MB, 14 chunks)
+src/recomp/ppu_recomp_0NN.cpp         (57,745 functions, 416 MB, 11 chunks)
         │  + src/gen/ppu_hle_nids.cpp  (1,056 HLE handlers)
         │  + ps3recomp_runtime.lib     (LV2/Cell HLE, RSX→D3D12, VFS)
         ▼  clang-cl / Ninja
@@ -177,7 +177,7 @@ imports.json          # 247 NIDs across 17 libraries, parsed from lib.stub
 analysis/             # ELF + function metadata (regenerated, git-ignored)
 src/compat/           # <dirent.h>/<unistd.h> shims for Win32
 src/gen/              # generated HLE NID dispatch table
-src/recomp/           # generated: 611 MB of lifted PPU code (git-ignored)
+src/recomp/           # generated: 416 MB of lifted PPU code (git-ignored)
 src/spu_gen/          # generated: lifted SPU images (git-ignored)
 tools/relift.sh       # one command to regenerate all of the above
 game/ disc/           # YOUR disc dump and decrypted EBOOT (git-ignored)
