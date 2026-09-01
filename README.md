@@ -49,9 +49,11 @@ the biggest thing ps3recomp has been pointed at.
 
 ## Current Status
 
-**It boots.** The title prints its own startup banner, initialises GCM/RSX, configures
-1280x720 video out, opens its packfiles and creates SPURS tasks. It currently
-blocks waiting on an SPU workload — see [`PROGRESS.md`](PROGRESS.md).
+**It boots and runs its own SPU code.** The title prints its startup banner,
+initialises GCM/RSX, configures 1280x720 video out, streams its packfiles, and
+dispatches **32 SPURS jobs across 4 job chains** into the recompiled SPU images —
+all returning `rc=0`, clearing the event flags the main thread waits on. It now
+crashes on an unimplemented `cellSpurs` queue NID; see [`PROGRESS.md`](PROGRESS.md).
 
 | Metric | Value |
 |---|---|
@@ -94,7 +96,8 @@ blocks waiting on an SPU workload — see [`PROGRESS.md`](PROGRESS.md).
 | First boot | ✅ **Reached** | CRT, TLS, `sys_initialize_tls`, the title's own banner, 256 MB memory report |
 | Filesystem | ✅ **Working** | `PARAM.SFO` read (`BLUS30201`), `shaders.vpp_ps3` + `startup.vpp_ps3` opened and read |
 | GCM / video out | ✅ **Init** | `_cellGcmInitBody`, 141 MB RSX host map, 1280x720 configured |
-| SPURS | ⏳ **Current frontier** | 17 event flags, 5 tasks, 2 job chains created; one job image is built at runtime and needs capture |
+| SPURS job dispatch | ✅ **Working** | 12 images registered by fingerprint; **32 jobs / 4 chains run and return `rc=0`**, 16 event-flag wakes |
+| SPURS tasksets | ⏳ **Current frontier** | crashes in `_cellSpursQueueInitialize` (NID `0x9034E538`) — 6 unresolved NIDs to implement |
 | Graphics (RSX → D3D12) | ⬜ Not started | harness provides it; needs a running boot first |
 | Audio / input | ⬜ Not started | |
 
@@ -114,7 +117,7 @@ This is the fifth title on the same harness, and the first AAA-scale one.
 | Imported libraries | 12 | 20 | 23 | **17** |
 | Imported functions | — | 256 | 265 | **247** |
 | SPU images | libsre PRX | captured at runtime | 22 embedded | **11 embedded** |
-| Status | renders | **playable** | boots to main loop | **boots to SPURS** |
+| Status | renders | **playable** | boots to main loop | **runs SPU jobs** |
 
 The pattern that keeps holding: **OS surface area does not scale with game
 size.** A 2008 open-world title imports fewer libraries than a 2011 trivia game,

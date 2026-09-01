@@ -358,24 +358,85 @@ match for the one the dispatcher reported as a MISS.
 | spu_0009 | `0x06CACFC7EF7D422A` | `spu_func_00000090` |
 | spu_0010 | `0xAFE45A90ED0E2128` | `spu_func_00000090` |
 
+**Phase 12 verified — the SPU side runs**
+
+The runtime-built job was captured in the same run that reported it missing
+(`SPU_DUMP_MISS=spu_dump` → `spujob_4333827302318B21_201984.bin`), lifted at
+base 0 under the `spujob_` prefix, and registered by hand in
+`src/spu_workloads.c` as image 12. With both registries linked in, the block
+clears on the first attempt:
+
+```
+[spu_workload] dispatch HIT (async) fp=0x22189973609C767C image=1 -> spawning thread
+[spurs-job]    dispatch HIT fp=0x4333827302318B21 image=12 job=0x4057C000
+[spurs-job]    job 0x4057C000 RETURNED rc=0
+[cellSpurs]    chain 0x4059D280: END after 16 job(s)
+[cellSpurs]    EventFlagWait WAKE tid=16744 flagEA=0x0350CF80 pattern=0x0003 got=0x0001
+```
+
+**32 SPU jobs dispatched and returned `rc=0` across 4 job chains** (of 16, 8, 2
+and 1 jobs), producing **16 event-flag wakes** — the exact flag the main thread
+had been parked on for 24 s in the previous run. 28 file reads follow, so the
+PPU side is consuming what the SPU side produced. Recompiled Cell SPU code is
+running and feeding recompiled PPU code.
+
+**Phase 13 — new frontier: cellSpurs tasksets**
+
+Boot now advances past job dispatch into taskset construction and stops there:
+
+```
+[cellSpurs] _TasksetAttributeInitialize(rev=1)
+[cellSpurs] CreateTaskset() ea=0x032B0F80 spurs=0x03467A80 (real BE layout)
+[cellSpurs] _QueueInitialize(taskset=0x032B0F80 q=0x032B2980 buf=0x032B2A00
+                             size=16 depth=512 dir=2)
+[hle] unresolved NID 0x9034E538
+
+[CRASH] code=0x80000003 rip=00007FF761647D32
+[CRASH] last HLE NID 0x9034E538 (_cellSpursQueueInitialize)
+[CRASH] guest ctr=0x00000000 lr=0x009F589C r3=0x00000000
+```
+
+`0x80000003` is the runtime's unimplemented-NID trap, not a lifter fault: the
+title calls `_cellSpursQueueInitialize`, gets no handler, and the guest is left
+with `ctr=0` to call through. This is the `cellSpurs` gap the Phase 6 triage
+predicted, arriving on schedule.
+
+Six NIDs went unresolved during this boot:
+
+| NID | Known as |
+|---|---|
+| `0x9034E538` | `_cellSpursQueueInitialize` — **the crash** |
+| `0x8F122EF8` | cellSpurs, taskset attribute path |
+| `0xE5443BE7` | cellSpurs, queue path |
+| `0x7CB33C2E` | unnamed in the NID database |
+| `0x011EE38B` | — |
+| `0x1656D49F` | — |
+
+Implementing them means editing `libs/spurs/cellSpurs.c` in the **shared**
+ps3recomp checkout, which flOw, Simpsons, Twisted Metal and You Don't Know Jack
+all build against. Left for a deliberate decision rather than done in passing.
+
 ### Known gaps at this point
 
-- **A second SPURS job is built at runtime**, not embedded:
-  `[spurs-job] dispatch MISS fp=0x4333827302318B21 size=201984 job=0x4057C000`.
-  201,984 bytes matches no extracted image (the largest is 160,456), so it is
-  assembled in main memory and has to be captured with `SPU_DUMP_MISS=spu_dump`
-  from a live run and re-lifted — the same procedure the Simpsons port uses for
-  its CRI job chain.
-- **5 unresolved NIDs** reached the HLE dispatcher during boot:
-  `0x8F122EF8`, `0x011EE38B`, `0x1656D49F`, `0x7CB33C2E`, `0x9034E538`.
+- **`cellSpurs` queue/taskset NIDs** — the crash above. Six unresolved, and they
+  live in the shared runtime rather than in this repo.
+- **Only 12.2% of the captured job image decodes as code** (24,724 of 201,984
+  bytes). That is expected for a SPURS job *chain* image — most of it is the
+  command list and staged data, not instructions — but it means the 509 lifted
+  functions are only the visible part, and a job whose real body sits in the
+  data region will not have been lifted.
 - **`Sony titleId = - , parentalLevel=0`** — `cellSysutil`'s
   `DiscGameGetBootDiscInfo()` returns an empty disc id. Harmless so far.
-- **3,429 undecoded SPU `.word` instructions** across the 11 images; whichever
-  of those land on a hot path will need opcode work in `spu_lifter.py`.
+- **3,429 undecoded SPU `.word` instructions** across the 11 embedded images
+  (plus 151 in the captured job); whichever land on a hot path will need opcode
+  work in `spu_lifter.py`.
 
 ### Next
 
-1. Re-run with the registry linked in and see whether the event flag clears.
-2. Capture the runtime-built job image with `SPU_DUMP_MISS` and lift it.
-3. Resolve the 5 unresolved NIDs.
-4. `RSX_LIVE_DRAW=1` for a first picture, once the SPU side stops blocking.
+1. Implement the six unresolved `cellSpurs` NIDs — `_cellSpursQueueInitialize`
+   first, since it is the one that crashes. Shared-runtime change; needs a call
+   on whether to touch `libs/spurs/cellSpurs.c` for four other ports.
+2. `RSX_LIVE_DRAW=1` for a first picture. The SPU side no longer blocks, so the
+   renderer is reachable as soon as boot clears the taskset path.
+3. Work through the undecoded SPU `.word` instructions as they surface.
+4. Fill in `DiscGameGetBootDiscInfo()` before anything starts checking it.
