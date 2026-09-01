@@ -275,10 +275,107 @@ They compile and link into the executable, but they are **not registered with
 the runtime's fingerprint registry yet**, so nothing dispatches to them. That is
 the next SPU task.
 
+**Phase 13 — First boot (REACHED)**
+
+The first run walked straight into the classic `0x39800000` wall:
+
+```
+[ppu] bctr to NULL from func_0003B728+0x7C5A r12(opd)=0x00CB0A6C
+      opd[0]=0x39800000 -- returning with r3 untouched
+```
+
+`0x39800000` is not an address, it is the instruction `li r12,0` — the first
+word of every import trampoline. **Every one of the 247 entries in
+`imports.json` had that same value in its `stub` field**, so `--hle-stubs` had
+no addresses to match and rewrote nothing; all 247 imports kept their literal
+trampolines, which dereference an import pointer table the recompilation never
+fills. Cause was not in this repo: `gen_imports.py` in the shared checkout was
+fixed four minutes *after* the file was generated, and the stale output had been
+carried forward. Regenerated → 247 distinct trampoline addresses, all 247 lift
+to `ps3_hle_call(nid)`, 57,745 → **57,762 functions** (the stub split adds 17).
+
+Second run, with `PS3_VFS_ROOT` corrected to the disc root (it had been pointed
+at `PS3_GAME/USRDIR`, so `cellGame` could not find `PARAM.SFO` one level up and
+fell back to title id `BLES00000`):
+
+```
+[cellGame] title id from PARAM.SFO: 'BLUS30201'
+[crt] sys_initialize_tls: block 0x0E000000, r13=0x0E007000
+
+*** Saints Row 2 for PLAYSTATION 3 Start ***
+Total PS3 Memory: 256.00MB  Available: 192.00MB  Used: 64.00MB
+
+[cellSysmodule] LoadModule(id=0x000E 'CELL_SYSMODULE_FS')
+Executable = "/dev_bdvd/PS3_GAME/USRDIR/EBOOT.BIN"
+gAppHome   = "/dev_bdvd/PS3_GAME/USRDIR"
+[HLE] _cellGcmInitBody(cmdSize=0x200000, ioSize=0x8D00000, ioAddr=0x40000000)
+RSXLocal:256MB (0xc0000000-cfffffff), GCM DL:2048KB, RSXHost:141MB
+[cellVideoOut] GetResolution(id=2) -> 1280x720
+[cellVideoOut] Configure: resId=2, format=0, aspect=0, pitch=5120
+[fs] open '/dev_bdvd/PS3_GAME/USRDIR/packfiles/ps3/shaders.vpp_ps3' -> fd 3
+[fs] open '/dev_bdvd/PS3_GAME/USRDIR/packfiles/ps3/startup.vpp_ps3' -> fd 3
+```
+
+**The title's own startup banner, its own memory accounting, its own RSX and
+video-out configuration, and its own packfiles being opened and read.** That is
+the engine running, not the harness. It then builds its SPU side — 17 event
+flags initialised and attached to LV2 event queues, 5 `cellSpursCreateTask`
+calls, 2 `RunJobChain` chains — and stops:
+
+```
+[spu_workload] async dispatch MISS fp=0x22189973609C767C size=27044
+[cellSpurs] EventFlagWait BLOCKED tid=11972 24s on pattern 0x0003
+            -- waiting for an SPU workload to cellSpursEventFlagSet it
+```
+
+`size=27044` is **exactly** the size of extracted SPU image #0
+(`spu_0000_at_00D8A180.elf`). The lifted code was in the executable; it simply
+was not registered, so `cellSpurs` could not find it, so nothing ever set the
+event flag the main thread waits on.
+
+**Phase 12 redone — SPU workload registry**
+
+Replaced the hand-rolled per-image lift loop with the toolkit's own
+`build_spu_workloads.py`, which lifts each image under its own C symbol prefix
+(all 11 otherwise define `spu_func_*` and `spu_recomp_register` and collide at
+link) and emits the registry mapping each image's FNV-1a-64 content fingerprint
+to its lifted entry, plus a constructor that registers them at startup.
+
+The generated fingerprint for image #0 is `0x22189973609C767C` — a byte-exact
+match for the one the dispatcher reported as a MISS.
+
+| image | fingerprint | entry |
+|---|---|---|
+| spu_0000 | `0x22189973609C767C` | `spu_func_00003078` |
+| spu_0001 | `0xBC6E4A2AF9D88C1C` | `spu_func_00003078` |
+| spu_0002 | `0x529E8F5BE2425919` | `spu_func_00003080` |
+| spu_0003 | `0x776A04B99AA4F916` | `spu_func_00003080` |
+| spu_0004 | `0x10A9679DE2147722` | `spu_func_00003080` |
+| spu_0005 | `0xB343E631610AECAF` | `spu_func_00003080` |
+| spu_0006 | `0xDCB331A33665F929` | `spu_func_00000100` |
+| spu_0007 | `0x541F122A9F1541DC` | `spu_func_00000098` |
+| spu_0008 | `0x682F681FADF7EBC5` | `spu_func_00000090` |
+| spu_0009 | `0x06CACFC7EF7D422A` | `spu_func_00000090` |
+| spu_0010 | `0xAFE45A90ED0E2128` | `spu_func_00000090` |
+
+### Known gaps at this point
+
+- **A second SPURS job is built at runtime**, not embedded:
+  `[spurs-job] dispatch MISS fp=0x4333827302318B21 size=201984 job=0x4057C000`.
+  201,984 bytes matches no extracted image (the largest is 160,456), so it is
+  assembled in main memory and has to be captured with `SPU_DUMP_MISS=spu_dump`
+  from a live run and re-lifted — the same procedure the Simpsons port uses for
+  its CRI job chain.
+- **5 unresolved NIDs** reached the HLE dispatcher during boot:
+  `0x8F122EF8`, `0x011EE38B`, `0x1656D49F`, `0x7CB33C2E`, `0x9034E538`.
+- **`Sony titleId = - , parentalLevel=0`** — `cellSysutil`'s
+  `DiscGameGetBootDiscInfo()` returns an empty disc id. Harmless so far.
+- **3,429 undecoded SPU `.word` instructions** across the 11 images; whichever
+  of those land on a hot path will need opcode work in `spu_lifter.py`.
+
 ### Next
 
-1. First boot: run `sr2.exe` against the real EBOOT and see how far the CRT gets.
-2. Register the 11 SPU images by fingerprint so `cellSpurs` can dispatch to them.
-3. Expect the ~38 boot-critical missing NIDs (`sysPrxForUser` 14, `cellSpurs` 11,
-   `sys_fs` 7, `cellGcmSys` 3) to surface roughly in that order.
-4. Work through the 3,429 undecoded SPU `.word` instructions.
+1. Re-run with the registry linked in and see whether the event flag clears.
+2. Capture the runtime-built job image with `SPU_DUMP_MISS` and lift it.
+3. Resolve the 5 unresolved NIDs.
+4. `RSX_LIVE_DRAW=1` for a first picture, once the SPU side stops blocking.

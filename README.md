@@ -49,7 +49,9 @@ the biggest thing ps3recomp has been pointed at.
 
 ## Current Status
 
-**It builds.** `sr2.exe` — 126 MB — links clean; first boot is the current frontier.
+**It boots.** The title prints its own startup banner, initialises GCM/RSX, configures
+1280x720 video out, opens its packfiles and creates SPURS tasks. It currently
+blocks waiting on an SPU workload — see [`PROGRESS.md`](PROGRESS.md).
 
 | Metric | Value |
 |---|---|
@@ -87,9 +89,12 @@ the biggest thing ps3recomp has been pointed at.
 | HLE NID table | ✅ **Complete** | 1,056 handlers / 88 modules (`src/gen/ppu_hle_nids.cpp`) |
 | SPU image extraction | ✅ **Complete** | 11 images pulled straight out of the EBOOT |
 | Boot harness (CMake) | ✅ **Written** | clang-cl, links prebuilt `ps3recomp_runtime.lib` |
-| Build & link | ✅ **Complete** | clang-cl, 29 objects, `sr2.exe` 126 MB, zero errors |
-| SPU lifting | ✅ **Complete** | 11 images → 7,995 functions; compile + link, not yet registered |
-| First boot | ⏳ **Current frontier** | |
+| Build & link | ✅ **Complete** | clang-cl, 29 objects, `sr2.exe` 133 MB, zero errors |
+| SPU lifting | ✅ **Complete** | 11 images → 7,995 functions, registered by FNV-1a-64 fingerprint |
+| First boot | ✅ **Reached** | CRT, TLS, `sys_initialize_tls`, the title's own banner, 256 MB memory report |
+| Filesystem | ✅ **Working** | `PARAM.SFO` read (`BLUS30201`), `shaders.vpp_ps3` + `startup.vpp_ps3` opened and read |
+| GCM / video out | ✅ **Init** | `_cellGcmInitBody`, 141 MB RSX host map, 1280x720 configured |
+| SPURS | ⏳ **Current frontier** | 17 event flags, 5 tasks, 2 job chains created; one job image is built at runtime and needs capture |
 | Graphics (RSX → D3D12) | ⬜ Not started | harness provides it; needs a running boot first |
 | Audio / input | ⬜ Not started | |
 
@@ -109,7 +114,7 @@ This is the fifth title on the same harness, and the first AAA-scale one.
 | Imported libraries | 12 | 20 | 23 | **17** |
 | Imported functions | — | 256 | 265 | **247** |
 | SPU images | libsre PRX | captured at runtime | 22 embedded | **11 embedded** |
-| Status | renders | **playable** | boots to main loop | **builds** |
+| Status | renders | **playable** | boots to main loop | **boots to SPURS** |
 
 The pattern that keeps holding: **OS surface area does not scale with game
 size.** A 2008 open-world title imports fewer libraries than a 2011 trivia game,

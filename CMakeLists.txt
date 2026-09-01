@@ -46,6 +46,7 @@ add_executable(sr2
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_hle.cpp"           # NID -> handler dispatch
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_sysprx.cpp"        # boot-critical CRT
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_fs.cpp"            # cellFs VFS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/spu_workloads.c"    # the runtime-built SPURS job
     ${GEN_SOURCES}
     ${SPU_SOURCES}
     ${RECOMP_SOURCES}

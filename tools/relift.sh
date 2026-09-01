@@ -37,13 +37,32 @@ python "$PS3RECOMP/tools/gen_hle_nids.py" --all --out src/gen/ppu_hle_nids.cpp
 # ---- SPU -------------------------------------------------------------------
 # Unlike the Simpsons port, SR2's SPU code IS embedded in the EBOOT as real SPU
 # ELFs -- 11 of them, 702 KB -- so they come straight out of the binary.
+# build_spu_workloads.py lifts each under its own symbol prefix (they all define
+# spu_func_*/spu_recomp_register, so they would otherwise collide) and emits the
+# registry that maps each image's FNV-1a-64 content fingerprint to its lifted
+# entry. Without that registry cellSpurs logs "dispatch MISS" and the main
+# thread blocks forever on an event flag only an SPU workload can set.
 python "$PS3RECOMP/tools/extract_spu_images.py" game/EBOOT.elf -o spu_dump
-for img in spu_dump/spu_*.elf; do
-    pfx="spu$(basename "$img" | sed 's/spu_\([0-9]*\)_.*/\1/')"
-    python "$PS3RECOMP/tools/find_spu_functions.py" "$img" \
-        --out "spu_dump/${pfx}_funcs.json"
-    rm -rf "src/spu_gen/$pfx" && mkdir -p "src/spu_gen/$pfx"
-    python "$PS3RECOMP/tools/spu_lifter.py" "$img" \
-        --functions "spu_dump/${pfx}_funcs.json" \
-        --symbol-prefix "${pfx}_" -o "src/spu_gen/$pfx"
-done
+rm -rf src/spu_gen && mkdir -p src/spu_gen
+python "$PS3RECOMP/tools/build_spu_workloads.py"     --images spu_dump --lifted src/spu_gen     --out src/spu_gen/sr2_spu_workloads.c     --register-fn sr2_spu_register_all --constructor --title sr2
+
+# One SPURS job (fp 0x4333827302318B21, 201,984 B) is built in main memory at
+# runtime and is NOT in the EBOOT, so extract_spu_images.py cannot find it.
+# Capture it from a run and re-run this script:
+#
+#   SPU_DUMP_MISS=spu_dump ./build/sr2 game/EBOOT.elf
+#
+# src/spu_workloads.c registers it by that fingerprint; without the lift the
+# build fails to link, which is the intended loud failure.
+JOB=spu_dump/spujob_4333827302318B21_201984.bin
+if [ -f "$JOB" ]; then
+    python "$PS3RECOMP/tools/find_spu_functions.py" "$JOB" --raw --base 0         --out spu_dump/spujob_funcs.json
+    rm -rf src/spu_gen/spujob && mkdir -p src/spu_gen/spujob
+    python "$PS3RECOMP/tools/spu_lifter.py" "$JOB" --base 0         --functions spu_dump/spujob_funcs.json         --symbol-prefix "spujob_" -o src/spu_gen/spujob
+    # The lifter emits depth-sensitive relative includes; the rest of the tree
+    # resolves these via the runtime/spu include path, so match it.
+    sed -i 's|"../../runtime/spu/spu_helpers.h"|"spu_helpers.h"|'         src/spu_gen/spujob/spu_recomp.c
+    sed -i 's|"../../runtime/spu/spu_context.h"|"spu_context.h"|'         src/spu_gen/spujob/spu_recomp.h
+else
+    echo "NOTE: $JOB not captured yet -- run with SPU_DUMP_MISS=spu_dump first"
+fi
