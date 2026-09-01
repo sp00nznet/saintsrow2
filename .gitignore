@@ -1,0 +1,46 @@
+# ── Copyrighted game material (bring your own legally-dumped disc) ──────
+*.7z
+*.rar
+*.iso
+disc/
+game/
+extracted/
+vfs/
+spu_dump/
+*.BIN
+*.elf
+*.SELF
+*.self
+*.SFO
+*.vpp_ps3
+*.bik
+
+# ── Generated recompilation output (regenerate: tools/relift.sh) ────────
+src/recomp/
+src/spu_gen/
+analysis/functions.json
+analysis/elf.json
+
+# ── Build artifacts ─────────────────────────────────────────────────────
+build/
+out/
+*.o
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.dll
+*.map
+
+# ── Logs / scratch ──────────────────────────────────────────────────────
+*.log
+_*.txt
+scratch/
+
+# ── IDE / OS ────────────────────────────────────────────────────────────
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

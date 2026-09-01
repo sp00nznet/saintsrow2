@@ -1,0 +1,63 @@
+# Saints Row 2 (BLUS30201, Volition/THQ) — ps3recomp configuration
+#
+# Modeled on flow/config.toml. Module list is the real import set parsed out of
+# the EBOOT's sys_proc_prx_param lib.stub tables: 17 libraries, 247 functions.
+
+[input]
+elf_path = "game/EBOOT.elf"      # produced by decrypting PS3_GAME/USRDIR/EBOOT.BIN
+sfo_path = "game/PARAM.SFO"
+
+[output]
+output_dir = "src/recomp/"
+func_prefix = "recomp_"
+generate_func_table = true
+
+[modules]
+# "hle" = use the ps3recomp host implementation. Core path = graphics, audio,
+# input, filesystem, SPURS. Everything online is stubbed for offline play.
+cellSpurs     = "hle"   # 42 — SPU task management; SR2 runs 11 embedded SPU images
+sceNp         = "stub"  # 30 — PSN presence/friends
+cellSysutil   = "hle"   # 26 — system params, video out, callbacks
+sysPrxForUser = "hle"   # 26 — TLS, lwmutex, threads, process exit
+sys_net       = "stub"  # 23 — sockets (co-op / multiplayer)
+sys_fs        = "hle"   # 21 — loads the .vpp_ps3 packfiles
+cellGcmSys    = "hle"   # 18 — RSX command submission
+cellMic       = "stub"  # 15 — voice chat input
+sys_io        = "hle"   # 10 — cellPad input
+cellHttp      = "stub"  # 10 — online services
+cellAudio     = "hle"   # 10 — PCM out
+cellNetCtl    = "stub"  #  6 — network status
+cellSync      = "hle"   #  4 — PPU/SPU sync primitives
+cellSysmodule = "hle"   #  3 — module load/unload
+cellHttpUtil  = "stub"  #  1
+cellRtc       = "hle"   #  1 — clock
+sceNp2        = "stub"  #  1
+
+[memory]
+main_ram_mb = 256
+vram_mb = 256
+thread_stack_kb = 1024
+
+[threading]
+max_ppu_threads = 64
+max_spu_threads = 6
+use_host_threads = true
+
+[graphics]
+backend = "d3d12"
+width = 1280
+height = 720
+vsync = "on"
+scale_factor = 1
+
+[audio]
+backend = "wasapi"
+sample_rate = 48000
+buffer_size = 512
+
+[debug]
+log_hle_calls = true
+log_missing_nids = true
+break_on_unimplemented = false
+dump_disassembly = false
+breakpoint_address = 0
