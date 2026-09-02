@@ -746,7 +746,62 @@ touches that line is image 2 (task 5) at `pc=0x128B8` (GETLLAR) → `0x12AA0`
 `m_bs[]` was deliberately left zeroed by the initialiser, and the consumer
 populates it itself — so leaving it alone was the right call.
 
+**Phase 19 — decoding the pop routine's empty-queue path**
+
+With the routine bounded (`0x128B8`-`0x12AA0`, image 2, task 5), its
+empty-queue branch at `0x12A44` decodes cleanly. Stripped of the SPU's
+branchless `selb`/`ceq` padding, it does this:
+
+```
+lqa     $r7,  0xA0        ; LS 0xA0 = queue+0x20   (line was DMA'd to LS 0x80)
+rotqbyi $r4,  $r7, 13     ; byte at queue+0x2D  -> cursor n
+clgtbi  $r47, $r4, 14     ; n > 14 ?
+brhnz   $r46, 0x12C2C     ;   -> error path
+ahi     $r61, $r4, 1      ; n+1
+cbd     $r57, $r1, 0      ; mask: insert a byte at position 0
+andi    $r60, $r61, 255
+cbx     $r54, $r1, $r60   ; mask: insert a byte at position (n+1)&15
+shufb   $r53, $r61, $r7,  $r57   ; queue+0x20[0]       = n+1
+shufb   $r51, $r88, $r53, $r54   ; queue+0x20[(n+1)&15] = r88
+stqa    $r51, 0xA0        ; write the group back
+...                       ; the same again for the group at queue+0x40,
+stqa    $r2,  0xC0        ;   whose cursor byte is queue+0x4D
+```
+
+`cbd`/`cbx` build byte-insertion masks and `shufb` applies them, so this is
+two single-byte writes into the 16-byte group at `queue+0x20`. Checked against
+the observed transition, it matches exactly: the cursor byte started at 0, so
+`n+1 = 1` went into byte 0 and `r88` went into byte 1 —
+
+```
++0x20: 00000000 -> 01050000
+```
+
+and the runtime trace shows `r88 = 5`, which is **task 5, the consumer that was
+registering itself**. So each 16-byte group is a small waiter ring:
+
+| byte | meaning |
+|---|---|
+| `[0]` | count / head |
+| `[1..12]` | waiter ids |
+| `[13]` | cursor (`queue+0x2D`, `queue+0x4D`) |
+
+with the `n > 14` guard bounding it to the group. (The parallel group at
+`queue+0x40` is written by the same routine; it did not show up in the diff
+only because `SPU_ATOM_FULL` dumps the first 64 bytes.)
+
+**This is the wake list a producer needs.** A PPU push can now read
+`queue+0x20` to find which task ids are blocked on this queue, and drive
+`CSTS_SIGNALLED` for them.
+
 ### Known gaps at this point
+- **Where the element data goes is still open.** The waiter/wake half of the
+  push is now understood; the data half — which ring slot an element occupies
+  and how the push counter advances — has not been pinned down, and no push
+  transition has ever been observed because nothing has ever pushed. The
+  remaining decode is the *other* branch of this routine (`0x129DC`, taken when
+  the queue is NOT empty), which is where the consumer computes the element
+  address it reads from and therefore names the slot the producer must fill.
 - **`cellSpursQueuePushBody` is the last stub on the critical path.** The pop
   half is now known (waiter count `+0x04` + id queue from `+0x32`) and the wake
   primitive exists (`CSTS_SIGNALLED`). What is still missing is the push half:
