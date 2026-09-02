@@ -691,9 +691,72 @@ The `9` never moves, and that column is the whole story:
 `cellSpursQueuePushBody` is still a logging stub. The producer says "pushed"
 nine times and writes nothing, so the consumer correctly finds nothing.
 
+**Phase 18 — reading the protocol off the running SPU**
+
+Static register-tracing through SPU code was going slowly, so the protocol was
+recovered *empirically* instead. The runtime already has `SPU_ATOM_EA=<hex>`,
+which filters every SPU atomic to one 128-byte line and dumps the line before
+and after each one. Pointing it at each queue in turn gives the transitions
+directly, with no guesswork.
+
+**Result 1 — the initialiser is verified correct.** Two different SPU routines,
+on two different queues, read back exactly the fields written in Phase 16:
+
+| | LFQueue `0x4059FD00` | SpursQueue `0x032B2980` |
+|---|---|---|
+| `+0x10` size | `0x20` (32) | `0x10` (16) |
+| `+0x14` depth | `0x200` (512) | `0x200` (512) |
+| `+0x18/1C` buffer | `0x4059FD80` | `0x032B2A00` |
+| `+0x24` direction | 3 (ANY2ANY) | 2 (PPU2SPU) |
+| `+0x2C` init | 1 | 1 |
+
+That is no longer an assumed layout — recompiled SPU code is reading those exact
+offsets and behaving coherently on them.
+
+**Result 2 — the pop-waiter protocol, from five real transitions.** On the
+LFQueue, five consumer tasks each ran one GETLLAR/PUTLLC pair
+(`pc=0x07D4C` → `0x080C8`). Diffing before/after:
+
+| # | `u16 @ +0x04` (`pop1.m_h3`) | other write |
+|---|---|---|
+| 1 | 0 → 1 | — (wrote `hs1[0]=0`, already zero) |
+| 2 | 1 → 2 | `u16 @ +0x34` (`m_hs1[1]`) = **2** |
+| 3 | 2 → 3 | `u16 @ +0x36` (`m_hs1[2]`) = **1** |
+| 4 | 3 → 4 | `u16 @ +0x38` (`m_hs1[3]`) = **3** |
+| 5 | 4 → 5 | `u16 @ +0x3A` (`m_hs1[4]`) = **4** |
+
+Operation *N* sets `m_h3 = N` and writes `m_hs1[N-1]`. The recorded values are
+`0, 2, 1, 3, 4` — the five task ids, in the order they blocked. So:
+
+- **`pop1.m_h3` (`+0x04`) is the count of blocked consumers**, and
+- **`m_hs1[]` (from `+0x32`, one u16 each) is the queue of their task ids.**
+
+Each consumer takes a ticket and parks its id in the slot that ticket names.
+That is exactly the structure a producer needs in order to know *who* to wake.
+
+**Result 3 — the consumer on the pushed-to queue is identified.** All 8
+`cellSpursQueuePushBody` calls target `0x032B2980`, and the only SPU code that
+touches that line is image 2 (task 5) at `pc=0x128B8` (GETLLAR) → `0x12AA0`
+(PUTLLC), called from `lr=0x12390`. Its single mutation before parking:
+
+```
++0x20: 00000000 -> 01050000      (m_bs[0]=0x01, m_bs[1]=0x05)
+```
+
+`m_bs[]` was deliberately left zeroed by the initialiser, and the consumer
+populates it itself — so leaving it alone was the right call.
+
 ### Known gaps at this point
-- **`cellSpursQueuePushBody` is the last stub on the critical path.** Writing an
-  element means driving the `pop1`/`push1`/`push2`/`pop2` packed-u16 pointer
+- **`cellSpursQueuePushBody` is the last stub on the critical path.** The pop
+  half is now known (waiter count `+0x04` + id queue from `+0x32`) and the wake
+  primitive exists (`CSTS_SIGNALLED`). What is still missing is the push half:
+  which counter names the ring slot an element goes into and how it advances.
+  Nothing has ever pushed, so no push transition has been *observed* — the trace
+  above only shows consumers blocking. The obvious next move is to read the
+  `0x128B8`–`0x12AA0` routine now that its exact bounds and its inputs are
+  known, since a queue's pop path necessarily encodes where the producer must
+  have put the data.
+- Writing an element also means driving the `pop1`/`push1`/`push2`/`pop2` packed-u16 pointer
   protocol at offsets 0x00/0x08/0x30/0x50 — the other half of the GETLLAR/PUTLLC
   handshake above, shared with SPU code that already implements its side
   correctly. That protocol has to be recovered from the title's own SPU image
@@ -713,12 +776,14 @@ nine times and writes nothing, so the consumer correctly finds nothing.
 
 ### Next
 
-1. **Implement `cellSpursQueuePushBody`** against the pointer protocol described
-   above, recovered from the pop path in SPU image 1. The 128-byte line layout
-   is now known and written correctly; what is missing is the push half of the
-   packed-u16 pointer state machine, plus setting the taskset's `CSTS_SIGNALLED`
-   bit so the consumer wakes. That is the single remaining gate — the renderer,
-   the tasksets, the job chains and the queue lines all already work.
+1. **Implement `cellSpursQueuePushBody`.** Everything around it is now known
+   and verified: the 128-byte line layout, the waiter count at `+0x04`, the
+   waiter-id queue from `+0x32`, the consumer routine (`0x128B8`-`0x12AA0` in
+   image 2), and the `CSTS_SIGNALLED` wake primitive. What remains is the ring
+   slot index and how the push counter advances — read it out of the
+   `0x128B8`-`0x12AA0` pop path, whose bounds and inputs are now pinned down.
+   That is the single remaining gate; the renderer, tasksets, job chains and
+   queue lines all already work.
 2. A first picture should follow immediately — `RSX_LIVE_DRAW=1` already opens
    the window and has three display buffers registered; it is only missing a
    command stream.
