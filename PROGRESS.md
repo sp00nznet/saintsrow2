@@ -515,16 +515,105 @@ taskset at `0x032B0F10` waiting for one of them to move it. Nothing is missing
 or unimplemented now — this is the SPURS task *scheduler* handshake, the same
 class of problem the existing runtime comments describe for other titles.
 
-### Known gaps at this point
+**Phase 15 — localising the WAIT_SIGNAL park**
 
-- **One taskset's context save area exceeds the title's own budget.** The second
-  pattern the game computes has 110 of 128 blocks set, giving 0x37800 (227,328 B)
-  against the 0x2D400 (185,344 B) it checks for — so that task declines rather
-  than being created. Either its read-only pattern should cover more blocks than
-  its ELF's non-writable segments do, or the real per-block cost is below 2 KB.
-  No clean formula makes 110 blocks fit in 185,344 bytes, so this is left honest
-  and logged rather than fitted to the one constant: a context size that is
-  quietly too small corrupts SPU state, which is worse than a task that declines.
+Three experiments, in increasing order of what they proved.
+
+**1. `LBP_WS_DRAIN=2` — confirmed the deadlock class for free.** The runtime
+already carries an opt-in escape that resumes a task parked with no signal.
+Turning it on:
+
+| | baseline | `WS_DRAIN=2` |
+|---|---:|---:|
+| SPU jobs returning `rc=0` | 30 | **46** |
+| Ring-buffer spins (`HOTREAD`) | 4 | **0** |
+
+The PPU's producer spin cleared completely, which proves the parked consumers
+were what stalled it. But it converts a deadlock into a **livelock**: task 5
+enters `WAIT_SIGNAL` 90 times, each time resuming, doing `ran=0ms` of work, and
+re-parking. Waking the task is not enough — it has nothing to consume.
+
+**2. `RSX_LIVE_DRAW=1` — the renderer is ready and waiting.**
+
+```
+[rsx] backend init OK -- window open
+[rsx] live-draw engine up (D3D12); GDI present suppressed
+[live-draw] display buffer 0 = loc0:0x00AE0000 pitch=5120 1280x720
+[live-draw] display buffer 1 = loc0:0x00000000 pitch=5120 1280x720
+[live-draw] display buffer 2 = loc0:0x00384000 pitch=5120 1280x720
+[live-draw] frame 1 packets[seen=0 queued=0] ...
+```
+
+A D3D12 window opens and the title registers **three 1280x720 display buffers**
+— but `packets[seen=0]`. The renderer is not the blocker; it is downstream of
+the SPU pipeline and simply never gets a command stream.
+
+**3. The task attribute ABI was wrong for this title — and that was a real bug.**
+
+The task-creation log was carrying nonsense in plain sight:
+
+```
+_cellSpursTaskAttributeInitialize(eaElf=0x00D9A180 ctx=0x0FEFF078
+                                  szctx=267382952 lsp=0x00000000 arg=0x0FEFF0A8)
+```
+
+`szctx=267382952` is `0x0FEFF0A8` — a **stack address**, not a size — and
+`lsPattern` is null. The runtime's own comments state that a task with a
+zero/garbage argument or an lsPattern that does not cover its stack is refused
+by the SPU task library and parks in `WAIT_SIGNAL` forever. That is precisely
+the symptom.
+
+The cause is a third caller shape. `_cellSpursTaskAttributeInitialize` is
+normally read as eight arguments with `eaContext`/`sizeContext`/`lsPattern` in
+r7/r8/r9. Saints Row 2 passes a **descriptor** instead:
+
+```
+009F58D0  addi r7, r1, 128     ; r7 = sp+0x80 -> descriptor
+009F58D4  addi r8, r1, 176     ; r8 = sp+0xB0 -> CellSpursTaskArgument
+009F58E8  stw  r9,  0x80(r1)   ;   [0] context EA
+009F58EC  stw  r11, 0x84(r1)   ;   [1] context size (from GetContextSaveAreaSize)
+009F58F0  stw  r25, 0x88(r1)   ;   [2] CellSpursTaskLsPattern*
+```
+
+So r8 — read as `sizeContext` — is the argument pointer, and r9 was never
+written at all. Added as `SPURS_TASKATTR_DESC=1`, **off by default** so the
+existing R8-form stays right for You Don't Know Jack and Jackbox. With it on,
+every field is real for the first time:
+
+```
+TaskAttr DESC-form: desc=0x0FEFF078 -> ctx=0x405A3D80 size=227328
+                    lsp=0x0FEFF098 arg=0x0FEFF0A8
+```
+
+`ctx` is a genuine buffer in the title's IO allocation, `size` a genuine size,
+and `lsp` a genuine pattern pointer where it had been null. SPU jobs completing
+went 30 → 45 and ring spins 4 → 2.
+
+> This also retires the previous entry's worry about the 227,328-byte context
+> save area: the title accepts that value here and builds the attribute with it,
+> so the `0x2D400` comparison seen earlier guards a different path. The size
+> computed by our `cellSpursTaskGetContextSaveAreaSize` is being used as-is.
+
+**The remaining gate, stated precisely.** Tasks are now created correctly and
+still park immediately, because nothing ever signals them:
+
+```
+QueuePushBody calls in a boot: 9
+cellSpursSendSignal calls:     0
+```
+
+The title pushes work into a SPURS queue and expects the SPURS kernel to wake
+the task blocked on that taskset. `cellSpursQueuePushBody` is a logging stub
+that writes nothing and wakes nobody, so the consumer has neither data nor a
+signal. The wake primitive already exists — `cellSpursSendSignal` sets the
+`CSTS_SIGNALLED` bitset the `WAIT_SIGNAL` handler blocks on — so the wake half
+is a small change. The data half needs the real `CellSpursQueue` ring layout,
+which is **not** in RPCS3 (unimplemented there too) and is read on the SPU side
+by Sony's own library code compiled into the title's SPU image. Guessing that
+layout would write garbage into guest memory that recompiled SPU code then
+consumes, so it needs to be recovered from the SPU image rather than invented.
+
+### Known gaps at this point
 - **Only 12.2% of the captured job image decodes as code** (24,724 of 201,984
   bytes). That is expected for a SPURS job *chain* image — most of it is the
   command list and staged data, not instructions — but it means the 509 lifted
@@ -538,12 +627,17 @@ class of problem the existing runtime comments describe for other titles.
 
 ### Next
 
-1. **The `WAIT_SIGNAL` handshake.** Find what writes the taskset word at
-   `0x032B0F10` on hardware and why no lifted task reaches it. This is the whole
-   remaining gate on the SPU side.
-2. `RSX_LIVE_DRAW=1` for a first picture — 15 tiled surfaces are already bound,
-   so the renderer is close behind whatever unblocks the scheduler.
-3. Resolve the oversized context save area above.
+1. **Recover the `CellSpursQueue` ring layout** from the title's SPU image —
+   the consumer's pop path in the lifted SPU code shows which offsets it reads.
+   Then implement `cellSpursQueuePushBody` to write an element and set the
+   taskset's `CSTS_SIGNALLED` bit. That is the single remaining gate: the
+   renderer, the tasksets and the job chains are all already working.
+2. A first picture should follow immediately — `RSX_LIVE_DRAW=1` already opens
+   the window and has three display buffers registered; it is only missing a
+   command stream.
+3. Decide whether `SPURS_TASKATTR_DESC` should auto-detect (a `sizeContext` that
+   is a guest stack address is self-evidently not a size) rather than stay an
+   env var.
 4. Work through the undecoded SPU `.word` instructions as they surface.
 5. Fill in `DiscGameGetBootDiscInfo()` before anything starts checking it.
 

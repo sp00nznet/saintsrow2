@@ -49,11 +49,12 @@ the biggest thing ps3recomp has been pointed at.
 
 ## Current Status
 
-**It boots, runs its own SPU code, and sets up render surfaces.** The title prints
-its startup banner, initialises GCM/RSX, configures 1280x720 video out, streams its
-packfiles, dispatches SPURS jobs into the recompiled SPU images, builds tasksets and
-queues, and binds **15 RSX tiled surfaces**. **Zero unresolved NIDs, zero crashes.**
-It now parks with SPU tasks waiting on signals; see [`PROGRESS.md`](PROGRESS.md).
+**It boots, runs its own SPU code, and opens a D3D12 window.** The title prints its
+startup banner, initialises GCM/RSX, streams its packfiles, dispatches SPURS jobs into
+the recompiled SPU images, builds tasksets and queues, binds 15 RSX tiled surfaces and
+registers **three 1280x720 display buffers**. **Zero unresolved NIDs, zero crashes.**
+The remaining gate is one missing SPURS handshake — the queue push that should wake a
+consumer task; see [`PROGRESS.md`](PROGRESS.md).
 
 | Metric | Value |
 |---|---|
@@ -99,7 +100,9 @@ It now parks with SPU tasks waiting on signals; see [`PROGRESS.md`](PROGRESS.md)
 | SPURS job dispatch | ✅ **Working** | 12 images registered by fingerprint; **32 jobs / 4 chains run and return `rc=0`**, 16 event-flag wakes |
 | SPURS tasksets / queues | ✅ **Working** | 6 `cellSpurs` NIDs implemented — LS patterns, context-save sizing, queue attach. **0 unresolved NIDs, no crash** |
 | RSX surface setup | ✅ **Reached** | 15 `cellGcmSetTile` / `BindTile` pairs — the render targets are being configured |
-| SPU task scheduling | ⏳ **Current frontier** | 16 tasks parked in `WAIT_SIGNAL`; PPU spins on a taskset word at `0x032B0F10` |
+| Task attribute ABI | ✅ **Fixed** | this title passes a *descriptor*; `sizeContext` was being read as a stack address and `lsPattern` as null |
+| Renderer bring-up | ✅ **Window opens** | D3D12 backend init OK, 3 display buffers at 1280x720, 0 packets (gated behind SPURS) |
+| SPURS queue push | ⏳ **Current frontier** | `cellSpursQueuePushBody` is a no-op stub: 9 pushes, 0 wakes, consumer parks forever |
 | Graphics (RSX → D3D12) | ⬜ Not started | harness provides it; needs a running boot first |
 | Audio / input | ⬜ Not started | |
 
@@ -119,7 +122,7 @@ This is the fifth title on the same harness, and the first AAA-scale one.
 | Imported libraries | 12 | 20 | 23 | **17** |
 | Imported functions | — | 256 | 265 | **247** |
 | SPU images | libsre PRX | captured at runtime | 22 embedded | **11 embedded** |
-| Status | renders | **playable** | boots to main loop | **SPU jobs + RSX surfaces** |
+| Status | renders | **playable** | boots to main loop | **SPU jobs + D3D12 window** |
 
 The pattern that keeps holding: **OS surface area does not scale with game
 size.** A 2008 open-world title imports fewer libraries than a 2011 trivia game,
