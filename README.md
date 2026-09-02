@@ -49,11 +49,11 @@ the biggest thing ps3recomp has been pointed at.
 
 ## Current Status
 
-**It boots and runs its own SPU code.** The title prints its startup banner,
-initialises GCM/RSX, configures 1280x720 video out, streams its packfiles, and
-dispatches **32 SPURS jobs across 4 job chains** into the recompiled SPU images —
-all returning `rc=0`, clearing the event flags the main thread waits on. It now
-crashes on an unimplemented `cellSpurs` queue NID; see [`PROGRESS.md`](PROGRESS.md).
+**It boots, runs its own SPU code, and sets up render surfaces.** The title prints
+its startup banner, initialises GCM/RSX, configures 1280x720 video out, streams its
+packfiles, dispatches SPURS jobs into the recompiled SPU images, builds tasksets and
+queues, and binds **15 RSX tiled surfaces**. **Zero unresolved NIDs, zero crashes.**
+It now parks with SPU tasks waiting on signals; see [`PROGRESS.md`](PROGRESS.md).
 
 | Metric | Value |
 |---|---|
@@ -71,7 +71,7 @@ crashes on an unimplemented `cellSpurs` queue NID; see [`PROGRESS.md`](PROGRESS.
 | Generated source | **416 MB** across 11 chunks |
 | Imported libraries | **17** |
 | Imported functions | **247** (234 named, 94%) |
-| HLE NID coverage | **164 / 247 (66%)** against ps3recomp's current table |
+| HLE NID coverage | **170 / 247 (69%)** — every NID the boot actually reaches is now handled |
 | Embedded SPU images | **11** (702,544 B) → **7,995 SPU functions**, 13 MB of C |
 | Disc payload | 6.3 GB — 24 `.vpp_ps3` packfiles + 11 Bink videos |
 | Target | Windows x86-64 |
@@ -97,7 +97,9 @@ crashes on an unimplemented `cellSpurs` queue NID; see [`PROGRESS.md`](PROGRESS.
 | Filesystem | ✅ **Working** | `PARAM.SFO` read (`BLUS30201`), `shaders.vpp_ps3` + `startup.vpp_ps3` opened and read |
 | GCM / video out | ✅ **Init** | `_cellGcmInitBody`, 141 MB RSX host map, 1280x720 configured |
 | SPURS job dispatch | ✅ **Working** | 12 images registered by fingerprint; **32 jobs / 4 chains run and return `rc=0`**, 16 event-flag wakes |
-| SPURS tasksets | ⏳ **Current frontier** | crashes in `_cellSpursQueueInitialize` (NID `0x9034E538`) — 6 unresolved NIDs to implement |
+| SPURS tasksets / queues | ✅ **Working** | 6 `cellSpurs` NIDs implemented — LS patterns, context-save sizing, queue attach. **0 unresolved NIDs, no crash** |
+| RSX surface setup | ✅ **Reached** | 15 `cellGcmSetTile` / `BindTile` pairs — the render targets are being configured |
+| SPU task scheduling | ⏳ **Current frontier** | 16 tasks parked in `WAIT_SIGNAL`; PPU spins on a taskset word at `0x032B0F10` |
 | Graphics (RSX → D3D12) | ⬜ Not started | harness provides it; needs a running boot first |
 | Audio / input | ⬜ Not started | |
 
@@ -117,7 +119,7 @@ This is the fifth title on the same harness, and the first AAA-scale one.
 | Imported libraries | 12 | 20 | 23 | **17** |
 | Imported functions | — | 256 | 265 | **247** |
 | SPU images | libsre PRX | captured at runtime | 22 embedded | **11 embedded** |
-| Status | renders | **playable** | boots to main loop | **runs SPU jobs** |
+| Status | renders | **playable** | boots to main loop | **SPU jobs + RSX surfaces** |
 
 The pattern that keeps holding: **OS surface area does not scale with game
 size.** A 2008 open-world title imports fewer libraries than a 2011 trivia game,

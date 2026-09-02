@@ -416,10 +416,115 @@ Implementing them means editing `libs/spurs/cellSpurs.c` in the **shared**
 ps3recomp checkout, which flOw, Simpsons, Twisted Metal and You Don't Know Jack
 all build against. Left for a deliberate decision rather than done in passing.
 
+**Phase 14 — the six cellSpurs NIDs, identified rather than guessed**
+
+ps3recomp computes each HLE NID **from the handler's own name** with the
+firmware hash, so a handler is only reachable if it is named exactly right.
+That turns naming into something checkable: `compute_nid(name)` either equals
+the NID the title imports, or it does not. Five of the six fell out immediately:
+
+| NID | Name | `compute_nid` |
+|---|---|---|
+| `0x9034E538` | `cellSpursTaskGetContextSaveAreaSize` | ✅ matches |
+| `0x8F122EF8` | `cellSpursTasksetAttributeSetTasksetSize` | ✅ matches |
+| `0xE5443BE7` | `cellSpursQueueAttachLv2EventQueue` | ✅ matches |
+| `0x011EE38B` | `_cellSpursLFQueueInitialize` | ✅ matches |
+| `0x1656D49F` | `cellSpursLFQueueAttachLv2EventQueue` | ✅ matches |
+| `0x7CB33C2E` | **`cellSpursTaskGetReadOnlyAreaPattern`** | ✅ found by search |
+
+The sixth was in no name table we had. Rather than guess, every `cellSpurs*`
+identifier in RPCS3's module source was hashed and compared — exactly one name
+out of 142 produced `0x7CB33C2E`. (RPCS3 is GPL and ps3recomp is MIT, so it was
+used only to confirm names and argument counts — facts about Sony's interface —
+and every implementation here is written from scratch.)
+
+> **The crash line was lying.** It reported
+> `last HLE NID 0x9034E538 (_cellSpursQueueInitialize)`, which sent the first
+> look at the wrong function entirely: `_cellSpursQueueInitialize` is NID
+> `0x082BFB09` and has been implemented since LBP. The printout pairs an
+> unresolved NID number with the last *named* handler it saw.
+
+**The ABI came off the call site, not from a header.** `func_009F56E0` builds
+every taskset, and its import calls annotate themselves once the stub addresses
+are mapped back through `imports.json`:
+
+```
+009F5750  _cellSpursTasksetAttributeInitialize
+009F5760  cellSpursTasksetAttributeSetName
+009F5770  cellSpursTasksetAttributeSetTasksetSize      <- was missing
+009F578C  cellSpursCreateTasksetWithAttribute
+009F583C  _cellSpursQueueInitialize
+009F5848  cellSpursQueueAttachLv2EventQueue            <- was missing
+009F5864  cellSpursTaskGetReadOnlyAreaPattern          <- was missing
+009F5898  cellSpursTaskGetContextSaveAreaSize          <- was missing (the crash)
+009F58F4  _cellSpursTaskAttributeInitialize
+```
+
+For the context-save call the registers settle the signature outright:
+
+```
+009F5744:  addi  r25, r1, 144      ; r25 = sp+0x90
+...
+009F5878:  addi  r3, r1, 112       ; r3  = sp+0x70   -> u32* size_out
+009F587C:  or    r4, r25, r25      ; r4  = sp+0x90   -> the LS pattern
+009F5888:  andc  r9, r10, r9       ; pattern = default & ~readOnly
+009F5894:  std   r0, 0x90(r1)      ;   ...built right here, into sp+0x90
+009F5898:  bl    cellSpursTaskGetContextSaveAreaSize
+009F58A0:  lwz   r11, 0x70(r1)     ; read the size back out of r3
+009F58AC:  subf  r0, r11, r0       ; r0 = 0x2D400 - size
+009F58B4:  blt   cr7, 0x9F5960     ; too big -> bail
+009F58EC:  stw   r11, 0x84(r1)     ; else store size next to the pattern ptr
+```
+
+So `cellSpursTaskGetContextSaveAreaSize(u32* size_out, const LsPattern*)`, and
+the caller masks the *read-only* blocks out first because those can be reloaded
+from the ELF instead of saved. Local store is 256 KB across a 128-bit pattern,
+so one bit is 2 KB; the save area is the register file plus every block the task
+may dirty.
+
+`cellSpursTaskGetReadOnlyAreaPattern` is implemented for real rather than
+stubbed: it parses the SPU ELF the title hands it and marks the blocks covered
+by non-writable `PT_LOAD` segments. The runtime already walks SPU program
+headers for `spu_elf_load_to_ls`, so this reuses that shape. It works on the
+title's actual images — `elf=0x00D9A180` in the log is extracted image #0 at its
+guest address, and `0x00DA0B80` is image #1:
+
+```
+[cellSpurs] TaskGetReadOnlyAreaPattern(elf=0x00D9A180) -> 03FFC00000000000 0000000000000000
+[cellSpurs] TaskGetReadOnlyAreaPattern(elf=0x00DA0B80) -> 03FFFFFFFF800000 0000000000000000
+[cellSpurs] TaskGetContextSaveAreaSize(ls=00000000007FFFFF FFFFFFFFFFFFFFFF, 87 blocks) -> 180224 (0x2C000)
+[cellSpurs] TasksetAttributeSetTasksetSize(size=10496)
+[cellSpurs] QueueAttachLv2EventQueue(q=0x032B2980)
+[cellSpurs] _LFQueueInitialize(owner=0x4059D400 q=0x4059FD00 buf=0x4059FD80 size=32 depth=512 dir=3)
+```
+
+**Result: zero unresolved NIDs, zero crashes.** Boot now clears taskset and
+queue construction and goes on to bind **15 RSX tiled surfaces**
+(`cellGcmSetTile` + `cellGcmBindTile`) — render-target setup — while running 29
+more SPU jobs and 13 event-flag wakes.
+
+**Phase 15 — new frontier: SPU task scheduling**
+
+```
+[spu_workload] task 3 (taskset 0x4059D400) sleeping 6s in WAIT_SIGNAL
+[HOTREAD] spinning on 0x032B0F10 (=0x40A40000) guest cia=0x00000000 lr=0x00A1A4EC
+```
+
+16 tasks are parked in `WAIT_SIGNAL` and the PPU spins on a word inside the
+taskset at `0x032B0F10` waiting for one of them to move it. Nothing is missing
+or unimplemented now — this is the SPURS task *scheduler* handshake, the same
+class of problem the existing runtime comments describe for other titles.
+
 ### Known gaps at this point
 
-- **`cellSpurs` queue/taskset NIDs** — the crash above. Six unresolved, and they
-  live in the shared runtime rather than in this repo.
+- **One taskset's context save area exceeds the title's own budget.** The second
+  pattern the game computes has 110 of 128 blocks set, giving 0x37800 (227,328 B)
+  against the 0x2D400 (185,344 B) it checks for — so that task declines rather
+  than being created. Either its read-only pattern should cover more blocks than
+  its ELF's non-writable segments do, or the real per-block cost is below 2 KB.
+  No clean formula makes 110 blocks fit in 185,344 bytes, so this is left honest
+  and logged rather than fitted to the one constant: a context size that is
+  quietly too small corrupts SPU state, which is worse than a task that declines.
 - **Only 12.2% of the captured job image decodes as code** (24,724 of 201,984
   bytes). That is expected for a SPURS job *chain* image — most of it is the
   command list and staged data, not instructions — but it means the 509 lifted
@@ -433,10 +538,20 @@ all build against. Left for a deliberate decision rather than done in passing.
 
 ### Next
 
-1. Implement the six unresolved `cellSpurs` NIDs — `_cellSpursQueueInitialize`
-   first, since it is the one that crashes. Shared-runtime change; needs a call
-   on whether to touch `libs/spurs/cellSpurs.c` for four other ports.
-2. `RSX_LIVE_DRAW=1` for a first picture. The SPU side no longer blocks, so the
-   renderer is reachable as soon as boot clears the taskset path.
-3. Work through the undecoded SPU `.word` instructions as they surface.
-4. Fill in `DiscGameGetBootDiscInfo()` before anything starts checking it.
+1. **The `WAIT_SIGNAL` handshake.** Find what writes the taskset word at
+   `0x032B0F10` on hardware and why no lifted task reaches it. This is the whole
+   remaining gate on the SPU side.
+2. `RSX_LIVE_DRAW=1` for a first picture — 15 tiled surfaces are already bound,
+   so the renderer is close behind whatever unblocks the scheduler.
+3. Resolve the oversized context save area above.
+4. Work through the undecoded SPU `.word` instructions as they surface.
+5. Fill in `DiscGameGetBootDiscInfo()` before anything starts checking it.
+
+> **Shared-runtime note.** The six handlers live in
+> `ps3recomp/libs/spurs/cellSpurs.c` + `cellSpurs.h`, which flOw, Simpsons,
+> Twisted Metal and You Don't Know Jack all build against. They are **added**
+> functions — no existing handler changed — so nothing those ports call behaves
+> differently, but the changes are left **uncommitted** in that checkout because
+> it already carries unrelated in-flight work (`cellSync.c`, `cellGame.c`,
+> `boot_main.cpp`, `sys_fs.c`, `pkg_extract.py`) that is not ours to commit.
+> The same applies to the jump-table cap in `tools/ppu_lifter.py`.

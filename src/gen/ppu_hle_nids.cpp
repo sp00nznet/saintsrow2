@@ -172,6 +172,7 @@ extern "C" {
     void cellGameDataCheck(void);
     void cellGameDataCheckCreate2(void);
     void cellGameDataCheckCreate(void);
+    void cellHddGameCheck(void);
     void cellGameGetParamInt(void);
     void cellGameGetParamString(void);
     void cellGameCreateGameData(void);
@@ -276,6 +277,11 @@ extern "C" {
     void cellGcmSortRemapEaIoAddress(void);
     void cellGcmGetReportDataAddressLocation(void);
     void cellGcmGetReportDataLocation(void);
+    void cellGcm_syscall_bringup(void);
+    void cellGcm_control_guest_addr(void);
+    void cellGcm_syscall_iomap(void);
+    void cellGcm_syscall_iounmap(void);
+    void cellGcm_syscall_set_fifo(void);
     void cellGemInit(void);
     void cellGemEnd(void);
     void cellGemGetInfo(void);
@@ -677,6 +683,12 @@ extern "C" {
     void cellSpursGetWorkloadInfo(void);
     void cellSpursShutdownWorkload(void);
     void cellSpursWaitForWorkloadShutdown(void);
+    void cellSpursTaskGetReadOnlyAreaPattern(void);
+    void cellSpursTaskGetContextSaveAreaSize(void);
+    void cellSpursTasksetAttributeSetTasksetSize(void);
+    void cellSpursQueueAttachLv2EventQueue(void);
+    void _cellSpursLFQueueInitialize(void);
+    void cellSpursLFQueueAttachLv2EventQueue(void);
     void cellSpursJobQueueAttributeInitialize(void);
     void cellSpursJobQueueAttributeSetMaxGrab(void);
     void cellSpursCreateJobQueue(void);
@@ -1057,6 +1069,7 @@ extern "C" {
     void sys_interrupt_thread_establish(void);
     void sys_interrupt_thread_disestablish(void);
     void sys_interrupt_thread_eoi(void);
+    void sys_rsx_init(void);
 }
 extern "C" void ppu_hle_register_all(void) {
     ps3_hle_register(0xD00A6988u, "cellAdecOpen", (void*)cellAdecOpen);
@@ -1230,6 +1243,7 @@ extern "C" void ppu_hle_register_all(void) {
     ps3_hle_register(0xDB9819F3u, "cellGameDataCheck", (void*)cellGameDataCheck);
     ps3_hle_register(0xC9645C41u, "cellGameDataCheckCreate2", (void*)cellGameDataCheckCreate2);
     ps3_hle_register(0xE7951DEEu, "cellGameDataCheckCreate", (void*)cellGameDataCheckCreate);
+    ps3_hle_register(0x9117DF20u, "cellHddGameCheck", (void*)cellHddGameCheck);
     ps3_hle_register(0xB7A45CAFu, "cellGameGetParamInt", (void*)cellGameGetParamInt);
     ps3_hle_register(0x3A5D726Au, "cellGameGetParamString", (void*)cellGameGetParamString);
     ps3_hle_register(0x42A2E133u, "cellGameCreateGameData", (void*)cellGameCreateGameData);
@@ -1334,6 +1348,11 @@ extern "C" void ppu_hle_register_all(void) {
     ps3_hle_register(0x25B40AB4u, "cellGcmSortRemapEaIoAddress", (void*)cellGcmSortRemapEaIoAddress);
     ps3_hle_register(0x8572BCE2u, "cellGcmGetReportDataAddressLocation", (void*)cellGcmGetReportDataAddressLocation);
     ps3_hle_register(0xA6B180ACu, "cellGcmGetReportDataLocation", (void*)cellGcmGetReportDataLocation);
+    ps3_hle_register(0x2D99A80Eu, "cellGcm_syscall_bringup", (void*)cellGcm_syscall_bringup);
+    ps3_hle_register(0x43E9F6E1u, "cellGcm_control_guest_addr", (void*)cellGcm_control_guest_addr);
+    ps3_hle_register(0xB362F22Fu, "cellGcm_syscall_iomap", (void*)cellGcm_syscall_iomap);
+    ps3_hle_register(0xCFF1548Eu, "cellGcm_syscall_iounmap", (void*)cellGcm_syscall_iounmap);
+    ps3_hle_register(0xAD27624Cu, "cellGcm_syscall_set_fifo", (void*)cellGcm_syscall_set_fifo);
     ps3_hle_register(0x13EA7C64u, "cellGemInit", (void*)cellGemInit);
     ps3_hle_register(0xE1F85A80u, "cellGemEnd", (void*)cellGemEnd);
     ps3_hle_register(0x9E1DFF96u, "cellGemGetInfo", (void*)cellGemGetInfo);
@@ -1735,6 +1754,12 @@ extern "C" void ppu_hle_register_all(void) {
     ps3_hle_register(0x4E153E3Eu, "cellSpursGetWorkloadInfo", (void*)cellSpursGetWorkloadInfo);
     ps3_hle_register(0x98D5B343u, "cellSpursShutdownWorkload", (void*)cellSpursShutdownWorkload);
     ps3_hle_register(0x5FD43FE4u, "cellSpursWaitForWorkloadShutdown", (void*)cellSpursWaitForWorkloadShutdown);
+    ps3_hle_register(0x7CB33C2Eu, "cellSpursTaskGetReadOnlyAreaPattern", (void*)cellSpursTaskGetReadOnlyAreaPattern);
+    ps3_hle_register(0x9034E538u, "cellSpursTaskGetContextSaveAreaSize", (void*)cellSpursTaskGetContextSaveAreaSize);
+    ps3_hle_register(0x8F122EF8u, "cellSpursTasksetAttributeSetTasksetSize", (void*)cellSpursTasksetAttributeSetTasksetSize);
+    ps3_hle_register(0xE5443BE7u, "cellSpursQueueAttachLv2EventQueue", (void*)cellSpursQueueAttachLv2EventQueue);
+    ps3_hle_register(0x011EE38Bu, "_cellSpursLFQueueInitialize", (void*)_cellSpursLFQueueInitialize);
+    ps3_hle_register(0x1656D49Fu, "cellSpursLFQueueAttachLv2EventQueue", (void*)cellSpursLFQueueAttachLv2EventQueue);
     ps3_hle_register(0x43DDAB4Fu, "cellSpursJobQueueAttributeInitialize", (void*)cellSpursJobQueueAttributeInitialize);
     ps3_hle_register(0x5FB9B05Du, "cellSpursJobQueueAttributeSetMaxGrab", (void*)cellSpursJobQueueAttributeSetMaxGrab);
     ps3_hle_register(0xE755F2B4u, "cellSpursCreateJobQueue", (void*)cellSpursCreateJobQueue);
@@ -2115,4 +2140,5 @@ extern "C" void ppu_hle_register_all(void) {
     ps3_hle_register(0xDB4AA0E4u, "sys_interrupt_thread_establish", (void*)sys_interrupt_thread_establish);
     ps3_hle_register(0x4A071D98u, "sys_interrupt_thread_disestablish", (void*)sys_interrupt_thread_disestablish);
     ps3_hle_register(0x6D728B5Fu, "sys_interrupt_thread_eoi", (void*)sys_interrupt_thread_eoi);
+    ps3_hle_register(0x101682A1u, "sys_rsx_init", (void*)sys_rsx_init);
 }
