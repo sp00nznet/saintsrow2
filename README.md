@@ -102,7 +102,8 @@ consumer task; see [`PROGRESS.md`](PROGRESS.md).
 | RSX surface setup | ✅ **Reached** | 15 `cellGcmSetTile` / `BindTile` pairs — the render targets are being configured |
 | Task attribute ABI | ✅ **Fixed** | this title passes a *descriptor*; `sizeContext` was being read as a stack address and `lsPattern` as null |
 | Renderer bring-up | ✅ **Window opens** | D3D12 backend init OK, 3 display buffers at 1280x720, 0 packets (gated behind SPURS) |
-| SPURS queue push | ⏳ **Current frontier** | `cellSpursQueuePushBody` is a no-op stub: 9 pushes, 0 wakes, consumer parks forever |
+| SPURS queue init | ✅ **Real** | both queues now built as genuine 128-byte big-endian `CellSyncLFQueue` lines in guest memory |
+| SPURS queue push | ⏳ **Current frontier** | `cellSpursQueuePushBody` still a stub — 9 pushes write nothing, so the consumer correctly finds an empty queue |
 | Graphics (RSX → D3D12) | ⬜ Not started | harness provides it; needs a running boot first |
 | Audio / input | ⬜ Not started | |
 

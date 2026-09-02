@@ -17,10 +17,14 @@
 | 10. Boot harness | CMake on the shared ps3recomp harness | ✅ written |
 | 11. Build & link | clang-cl / Ninja | ✅ — `sr2.exe` links |
 | 12. SPU lift | 11 images → C | ✅ — 7,995 functions, 13 MB |
-| 13. First boot | Enter the recompiled CRT | ⏳ current |
-| 14. Graphics | RSX → D3D12 | ⬜ |
-| 15. Audio / input | cellAudio + cellPad | ⬜ |
-| 16. Playable | | ⬜ |
+| 13. First boot | Enter the recompiled CRT | ✅ — title banner, GCM, video out |
+| 14. cellSpurs NIDs | 6 missing handlers implemented | ✅ — 0 unresolved, no crash |
+| 15. Task attribute ABI | descriptor form (`SPURS_TASKATTR_DESC`) | ✅ — fields were garbage |
+| 16. SPURS queue init | real BE `CellSyncLFQueue` lines in guest memory | ✅ |
+| 17. SPURS queue push | `cellSpursQueuePushBody` pointer protocol | ⏳ current — the last gate |
+| 18. Graphics | RSX → D3D12 | 🟡 window + 3 display buffers, 0 packets |
+| 19. Audio / input | cellAudio + cellPad | ⬜ |
+| 20. Playable | | ⬜ |
 
 ## Detailed log
 
@@ -613,7 +617,89 @@ by Sony's own library code compiled into the title's SPU image. Guessing that
 layout would write garbage into guest memory that recompiled SPU code then
 consumes, so it needs to be recovered from the SPU image rather than invented.
 
+**Phase 16 — reading the consumer, and making the queues real**
+
+The way to stop guessing about the queue was to read the consumer. Task 5 runs
+SPU image 1 and calls `WAIT_SIGNAL` from LS `0x12B80`; disassembling around
+there shows exactly how it talks to the PPU:
+
+```
+00012AE4  il    $r63, 128
+00012AE8  wrch  MFC_LSA,  $r63        ; local store 0x80
+00012AF0  wrch  MFC_EAH,  $r65
+00012AF8  wrch  MFC_EAL,  $r64        ; ...against a main-memory EA
+00012AFC  wrch  MFC_Size, $r63        ; 128 bytes
+00012B0C  wrch  MFC_Cmd,  $r12        ; 0xB4 = PUTLLC
+00012B10  rdch  $r11, MFC_RdAtomicStat
+00012B14  brnz  $r11, 0x128B8         ; contended -> retry
+```
+
+A **GETLLAR/PUTLLC lock-line atomic on a 128-byte line in main memory.** So the
+bytes in guest memory *are* the interface between the recompiled PPU code and
+the recompiled SPU code, and they have to be the genuine big-endian
+`CellSyncLFQueue` line:
+
+```
+0x00 pop1   0x10 size   0x18 buffer(u64)  0x24 direction  0x2C init   0x70 eaSignal
+0x08 push1  0x14 depth  0x20 bs[4]        0x28 v1         0x30 push2  0x50 pop2
+```
+
+Two independent checks that this is the right structure: the title passes
+`q=0x4059FD00` with `buffer=0x4059FD80`, and `q=0x032B2980` with
+`buffer=0x032B2A00` — **both exactly 0x80 apart**, a buffer starting right after
+a 128-byte header.
+
+> **A trap worth recording.** `libs/sync/cellSync.c` already has a
+> `CellSyncLFQueue` and delegating to it looks like the obvious lazy win. It is
+> the wrong move: that one is a **host-native** struct — `atomic_uint` fields and
+> a 64-bit host `buffer` pointer. It is perfectly fine for a queue whose both
+> ends are HLE, and actively harmful here, because writing it into guest memory
+> hands recompiled SPU code a host pointer where a 32-bit big-endian EA belongs.
+> Reusing it would have been worse than the no-op stub it replaced.
+
+So `_cellSpursLFQueueInitialize` and `_cellSpursQueueInitialize` were both
+rewritten to build the real line: zero the 128 bytes, then set `size`, `depth`,
+`buffer`, `direction`, the `init` flag and `eaSignal`, and clear the element
+buffer. Only fields the arguments determine outright — the `bs[]`/`v1` slot
+state machine is left zero rather than invented.
+
+**Phase 17 — the probe that says what is left**
+
+With both queues properly initialised, `LBP_WS_DRAIN=2` was used again purely as
+a *probe*: force the parked tasks awake and see whether they now do work against
+a valid queue.
+
+```
+66 wakes, every single one ran=0ms
+```
+
+That is the answer, and it is a clean negative result. The tasks are not stuck
+on corruption any more and they are not failing to wake — **they park because
+the queue is genuinely empty**, and they are right to. Across the session:
+
+| run | SPU jobs `rc=0` | ring spins | queue pushes |
+|---|---:|---:|---:|
+| six NIDs implemented | 30 | 4 | 9 |
+| + `SPURS_TASKATTR_DESC` | 45 | 3 | 9 |
+| + real LFQueue line | 53 | 4 | 9 |
+| + real Queue line | 46 | 2 | 9 |
+
+(Job counts vary run to run — these are timing-dependent, not a clean monotonic
+climb — but the direction is consistent and no run crashes.)
+
+The `9` never moves, and that column is the whole story:
+`cellSpursQueuePushBody` is still a logging stub. The producer says "pushed"
+nine times and writes nothing, so the consumer correctly finds nothing.
+
 ### Known gaps at this point
+- **`cellSpursQueuePushBody` is the last stub on the critical path.** Writing an
+  element means driving the `pop1`/`push1`/`push2`/`pop2` packed-u16 pointer
+  protocol at offsets 0x00/0x08/0x30/0x50 — the other half of the GETLLAR/PUTLLC
+  handshake above, shared with SPU code that already implements its side
+  correctly. That protocol has to be recovered from the title's own SPU image
+  (its pop path is right there in image 1) rather than guessed or transcribed:
+  a wrong pointer update corrupts a queue that recompiled SPU code then consumes,
+  and it would fail silently.
 - **Only 12.2% of the captured job image decodes as code** (24,724 of 201,984
   bytes). That is expected for a SPURS job *chain* image — most of it is the
   command list and staged data, not instructions — but it means the 509 lifted
@@ -627,11 +713,12 @@ consumes, so it needs to be recovered from the SPU image rather than invented.
 
 ### Next
 
-1. **Recover the `CellSpursQueue` ring layout** from the title's SPU image —
-   the consumer's pop path in the lifted SPU code shows which offsets it reads.
-   Then implement `cellSpursQueuePushBody` to write an element and set the
-   taskset's `CSTS_SIGNALLED` bit. That is the single remaining gate: the
-   renderer, the tasksets and the job chains are all already working.
+1. **Implement `cellSpursQueuePushBody`** against the pointer protocol described
+   above, recovered from the pop path in SPU image 1. The 128-byte line layout
+   is now known and written correctly; what is missing is the push half of the
+   packed-u16 pointer state machine, plus setting the taskset's `CSTS_SIGNALLED`
+   bit so the consumer wakes. That is the single remaining gate — the renderer,
+   the tasksets, the job chains and the queue lines all already work.
 2. A first picture should follow immediately — `RSX_LIVE_DRAW=1` already opens
    the window and has three display buffers registered; it is only missing a
    command stream.
