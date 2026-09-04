@@ -854,10 +854,61 @@ group that were misplaced. (The first cut of the probe had the same bug from the
 other side, shifting 15 bytes across `0x21..0x2F` and walking over the same two
 fields. Both are fixed: the probe now touches only `0x21..0x23`.)
 
+**Phase 21 — two pointer models tried, both wrong**
+
+Both follow-ups from Phase 20 were tested and **both failed**. Recording them
+because eliminating a plausible model is worth as much as the time it saves the
+next attempt.
+
+**(a) Producer claims `+0x00` as a grant.** Mirroring the observed
+`0x12D2C` transition (`v<0 ? -v : v+1`) on every push. The prediction was that
+the handshake would settle. It did the opposite — the magnitude ran away:
+
+```
+sync=-58->58 ... sync=195->196 ... sync=284->285 ... sync=-383->383
+```
+
+383 within a handful of pushes. So `|v|` is **not** a waiter count; it behaves
+like a monotonically climbing ticket, and the SPU is busy-spinning rounds rather
+than waiting on a semaphore. Metrics were flat against the previous run
+(jobs 38 vs 39, spins 1 vs 1, BindTile 15 vs 13).
+
+**(b) Producer advances `+0x04` as its own tail.** Better grounded: the consumer
+normalises both words with
+
+```
+cgti $rf, $rv, -1 ; nor $rc, $rv, $rv ; selb $rn, $rc, $rv, $rf
+```
+
+— "if v >= 0 use v else use ~v", a pointer with a flag parked in the sign bit —
+then differences the two (`0x12914`..`0x129D0`) to decide empty. That reads like
+a head/tail pair with `+0x00` the consumer's side and `+0x04` the producer's.
+Advancing `+0x04` sign-normalised changed nothing either.
+
+**The measurement that would settle it has never once fired.** Across every
+configuration tried — with and without pushes, both pointer models, `WS_DRAIN`
+on and off — the consumer has **never issued a single DMA into the element
+buffer** (`0x032B2A00`..`0x032B4A00`). Its DMA targets are consistently
+elsewhere (`0x0309B200`, `0x03403500`, `0x040600xxx`, and two single reads at
+`0x032B2890`/`0x032B0EF0` that sit just *below* the queue and taskset). Until
+that read appears, no pointer model can be confirmed, and guessing further just
+writes plausible-looking values into a structure recompiled SPU code consumes.
+
+So both guesses were reverted. What the probe now writes is exactly the part
+with evidence behind it: the element bytes, the `+0x0C` fill count the consumer
+was **observed** decrementing, and the waiter wake. Both pointers are read for
+the log and otherwise left alone. That state keeps the Phase 20 win — the
+producer still pushes 12 where it used to stop at 8, and the ring spin stays at
+1 instead of 2.
+
 ### Known gaps at this point
-- **`+0x00` handshake participation** is the next step, and it is now specific:
-  the producer should claim the sync word the way `0x12D2C` does, rather than
-  pushing silently beside it.
+- **The consumer has never read the element buffer**, which is the single
+  measurement that would validate any push model. The next step is not another
+  guess: it is a proper static decode of the compare at `0x12914`-`0x129D0` —
+  which exact fields feed the difference, what the wrap term at `+0x0C` does,
+  and what the sign flags mean — so that a model can be *derived* rather than
+  trialled. Trial-and-error on this structure has now been shown to be a poor
+  use of runs.
 - **Where `direction` and `init` actually live** needs settling before the
   initialiser can be called correct — `+0x24`/`+0x2C` are inside the SPU's
   group and demonstrably get shifted.
