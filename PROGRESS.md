@@ -794,7 +794,73 @@ only because `SPU_ATOM_FULL` dumps the first 64 bytes.)
 `queue+0x20` to find which task ids are blocked on this queue, and drive
 `CSTS_SIGNALLED` for them.
 
+**Phase 20 — a push probe, and what the consumer did with it**
+
+The data half was never going to fall out of static reading, so it was probed
+instead. `cellSpursQueuePushBody` got a deliberately *self-revealing*
+implementation behind `SPURS_QUEUE_PUSH=1` (off by default): push into a
+candidate slot, wake any registered waiter, log everything — on the theory that
+the consumer's own DMA would name the correct slot whether or not the guess was
+right. It did better than that.
+
+**The producer came unstuck.** The title had pushed exactly 8 times and stopped
+in every previous run. With the probe it pushes **12 and keeps going**, and the
+PPU ring spin drops from 2 to 1. Something downstream of the push was gating the
+producer, and it no longer is.
+
+**`+0x0C` is a fill count, not an index.** The first run caught the consumer
+doing this:
+
+```
+PUTLLC pc=0x12D2C   +0x0C: 00020000 -> 00010000     (u16: 2 -> 1)
+```
+
+The probe had pushed twice and incremented `+0x0C` twice; the consumer
+**decremented it**. So `+0x0C` counts elements currently queued, and the
+consumer really is consuming what the probe enqueues. That is the first
+observed push/pop interaction in this port.
+
+**`+0x00` is a synchronisation word, and the producer is meant to be in it.**
+With the probe running, the atomics settle into a perfectly regular ping-pong
+between two call sites in the same image:
+
+| pc | transition |
+|---|---|
+| `0x12AA0` (wait side) | `0 → -1`, `1 → -2`, `2 → -3`, `3 → -4` |
+| `0x12D2C` (signal side) | `-1 → 1`, `-2 → 2`, `-3 → 3` |
+
+Negative magnitude reads as "N consumers waiting", positive as "N items
+available" — a counting handshake. It never terminates because the probe never
+touches `+0x00`: on hardware the *producer* is the other party. That is the next
+concrete thing to implement.
+
+**A mistake of mine, caught by the same trace.** One transition read:
+
+```
+PUTLLC pc=0x12AA0   +0x24: 00000002 -> 00000200 ; +0x2C: 00000001 -> 00000100
+```
+
+Both values moved up by exactly one byte — the signature of the
+`shlqbyi <group>, 1` at `0x12A0C`, i.e. the SPU shifting the **whole 16-byte
+group at `+0x20..+0x2F`** left by a byte as it dequeues. `0x02` and `0x01` are
+the `direction` and `init` values the Phase 16 initialiser writes at `+0x24` and
+`+0x2C`.
+
+So those two fields do **not** live there in this structure, and the initialiser
+has been writing them into the middle of the SPU's own state group. The fields
+that were positively confirmed — `size` `+0x10`, `depth` `+0x14`, `buffer`
+`+0x18` — are all below `+0x20` and remain good; it is only the two inside the
+group that were misplaced. (The first cut of the probe had the same bug from the
+other side, shifting 15 bytes across `0x21..0x2F` and walking over the same two
+fields. Both are fixed: the probe now touches only `0x21..0x23`.)
+
 ### Known gaps at this point
+- **`+0x00` handshake participation** is the next step, and it is now specific:
+  the producer should claim the sync word the way `0x12D2C` does, rather than
+  pushing silently beside it.
+- **Where `direction` and `init` actually live** needs settling before the
+  initialiser can be called correct — `+0x24`/`+0x2C` are inside the SPU's
+  group and demonstrably get shifted.
 - **Where the element data goes is still open.** The waiter/wake half of the
   push is now understood; the data half — which ring slot an element occupies
   and how the push counter advances — has not been pinned down, and no push
