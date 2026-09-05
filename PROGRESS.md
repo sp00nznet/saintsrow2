@@ -901,7 +901,73 @@ the log and otherwise left alone. That state keeps the Phase 20 win — the
 producer still pushes 12 where it used to stop at 8, and the ring spin stays at
 1 instead of 2.
 
+**Phase 22 — deriving the ring instead of guessing it**
+
+Working the consumer's decision at `0x12914`-`0x129D0` backwards through its
+dataflow, rather than trying models at runtime:
+
+```
+r11 = normalise(W0)          W0 = queue+0x00
+r2  = normalise(W1)          W1 = queue+0x04
+r60 = W3                     W3 = queue+0x0C
+      normalise(v) == cgti/nor/selb == (v >= 0 ? v : ~v)
+
+r81 = r2 - r11
+r79 = (r2 + r60) - (r11 - r60)  =  r2 - r11 + 2*r60
+r68 = (r11 > r2) ? r79 : r81    =  (r2 - r11) mod 2*r60
+ceqi r77, r68, 0                -> THE EMPTY TEST
+
+r14 = (r60 > r11) ? r11 : r11 - r60   =  index mod r60     (0x129A8..0x129B8)
+```
+
+So it is an ordinary ring buffer: **`W0` is the pop index, `W1` the push index,
+indices run modulo `2*W3`, and the slot is `index mod W3`** — the standard
+scheme that keeps "full" distinguishable from "empty". `W3` is the depth.
+
+**And that was the bug.** The Phase 16 initialiser left `queue+0x0C` at **zero**,
+so `r60 = 0` and the whole computation degenerates: occupancy is `(W1-W0) mod 0`
+and the slot is `index mod 0`. With both indices at zero the empty test is
+trivially true — which is exactly why the consumer parked every single time and
+never read the element buffer, no matter what any producer wrote. Fixed in both
+initialisers.
+
+**A correction to Phase 21.** The `+0x00` sequence called a "runaway ticket"
+there is nothing of the kind. Applying the normalise function the consumer
+itself uses:
+
+| raw | `0 → -1 → 1 → -2 → 2 → -3 → 3` |
+|---|---|
+| normalised | `0, 0, 1, 1, 2, 2, 3` |
+
+The sign bit is a **parked flag** and the index underneath advances cleanly.
+`0x12AA0` sets the flag without moving the index (`v -> ~v`); `0x12D2C` clears it
+and advances by one. The consumer was popping all along. The producer's own log
+agrees — after four pushes it reads `sync=4/4`, a pop index that has tracked the
+push index exactly.
+
+**The `+0x24`/`+0x2C` pollution is gone.** With those writes removed the trace
+shows both words sitting at zero and staying there, instead of marching a byte
+per dequeue through the SPU's state group. Jobs completing went 39 -> 45 and
+tiles bound returned to 15.
+
+**Phase 23 — the next real problem: a lost-update race**
+
+With the line dumped either side of each atomic, successive stores show word 1
+(`+0x04`) holding `1, 1, 2` — the SPU writing the push index back itself. That
+is expected: `PUTLLC` commits the **whole 128-byte line**, every word of it.
+
+The producer, though, writes `+0x04` with a plain `vm_write32`. A push that
+lands between the consumer's `GETLLAR` and its `PUTLLC` is therefore silently
+discarded when the SPU commits its stale copy of the line. The producer is not
+participating in the lock-line protocol at all, and on a queue whose entire
+point is cross-processor atomicity that cannot work.
+
 ### Known gaps at this point
+- **The producer must join the reservation protocol.** A PPU-side push has to
+  either take part in the GETLLAR/PUTLLC reservation the way the SPU does, or go
+  through a runtime path that invalidates an outstanding SPU reservation when
+  the PPU writes the line. Until then pushes are racy by construction and any
+  further tuning of indices is measuring noise.
 - **The consumer has never read the element buffer**, which is the single
   measurement that would validate any push model. The next step is not another
   guess: it is a proper static decode of the compare at `0x12914`-`0x129D0` —
